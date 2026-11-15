@@ -1,11 +1,11 @@
 name: Build app
 
 # Builds "Little Helpers.app" on a Mac in the cloud.
-# Every push checks that the code compiles; a tag such as v1.0 also publishes a release.
+# Every push to main builds the app and publishes (or updates) the release
+# named after the number in the VERSION file, e.g. 1.0 -> v1.0.
 on:
   push:
     branches: [main]
-    tags: ['v*']
   workflow_dispatch:
 
 permissions:
@@ -32,15 +32,21 @@ jobs:
           codesign --force --sign - "build/$APP"
           cd build && ditto -c -k --keepParent "$APP" ../LittleHelpers-mac.zip
 
+      - name: Read the version
+        run: echo "VERSION=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_ENV"
+
       - uses: actions/upload-artifact@v4
         with:
           name: LittleHelpers-mac
           path: LittleHelpers-mac.zip
 
       - name: Publish the release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ env.VERSION }}
+          name: Little Helpers ${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
           files: LittleHelpers-mac.zip
           body: |
             Pixel pets that run across your Mac with gentle reminders <3
