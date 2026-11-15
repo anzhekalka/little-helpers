@@ -32,6 +32,32 @@ jobs:
           codesign --force --sign - "build/$APP"
           cd build && ditto -c -k --keepParent "$APP" ../LittleHelpers-mac.zip
 
+      - name: Smoke test (launch, watch the cat, open the menu)
+        run: |
+          mkdir -p shots
+          open "build/Little Helpers.app"
+          sleep 4
+          screencapture -x shots/1-hello-cat.png
+          sleep 3
+          screencapture -x shots/2-cat-running.png
+          pgrep -x LittleHelpers >/dev/null || { echo "The app is not running after launch."; exit 1; }
+          echo "The app launched and is still running."
+          if osascript -e 'tell application "System Events" to tell process "LittleHelpers" to click menu bar item 1 of menu bar 2'; then
+            echo "Clicked the paw icon."
+          else
+            echo "Could not click the paw icon on this machine (no accessibility permission)."
+          fi
+          sleep 2
+          screencapture -x shots/3-menu.png
+          pgrep -x LittleHelpers >/dev/null || { echo "The app stopped after opening the menu."; exit 1; }
+          echo "The app is still running after opening the menu."
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-test-screenshots
+          path: shots
+
       - name: Read the version
         run: echo "VERSION=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_ENV"
 
