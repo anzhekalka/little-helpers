@@ -50,7 +50,7 @@ jobs:
               break
             fi
           done
-          [ "$clicked" = yes ] || echo "Could not click the paw icon on this machine.
+          [ "$clicked" = yes ] || echo "Could not click the paw icon on this machine."
           sleep 2
           screencapture -x shots/3-menu.png
           pgrep -x LittleHelpers >/dev/null || { echo "The app stopped after opening the menu."; exit 1; }
