@@ -42,21 +42,29 @@ jobs:
           screencapture -x shots/2-cat-running.png
           pgrep -x LittleHelpers >/dev/null || { echo "The app is not running after launch."; exit 1; }
           echo "The app launched and is still running."
-          if osascript -e 'tell application "System Events" to tell process "LittleHelpers" to click menu bar item 1 of menu bar 2'; then
-            echo "Clicked the paw icon."
-          else
-            echo "Could not click the paw icon on this machine (no accessibility permission)."
-          fi
+          clicked=no
+          for bar in 1 2; do
+            if osascript -e "tell application \"System Events\" to tell process \"LittleHelpers\" to click menu bar item 1 of menu bar $bar"; then
+              echo "Clicked the paw icon (menu bar $bar)."
+              clicked=yes
+              break
+            fi
+          done
+          [ "$clicked" = yes ] || echo "Could not click the paw icon on this machine.
           sleep 2
           screencapture -x shots/3-menu.png
           pgrep -x LittleHelpers >/dev/null || { echo "The app stopped after opening the menu."; exit 1; }
           echo "The app is still running after opening the menu."
 
-      - uses: actions/upload-artifact@v4
+      # Screenshots go into a private draft release (only the owner can see drafts).
+      - name: Save the screenshots
         if: always()
+        uses: softprops/action-gh-release@v2
         with:
-          name: smoke-test-screenshots
-          path: shots
+          draft: true
+          tag_name: test-${{ github.run_number }}
+          name: Test screenshots ${{ github.run_number }}
+          files: shots/*.png
 
       - name: Read the version
         run: echo "VERSION=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_ENV"
