@@ -238,6 +238,9 @@ struct SavedState: Codable {
     var day: String
     var height: String?      // "bottom", "middle" or "custom" (missing in older saves)
     var customY: Double?     // screen height of the pet's middle, for "custom"
+    var tasks: [PlannedTask]?
+    var delivered: [String]? // "task id|yyyy-MM-dd" for notes already shown
+    var noteCorner: String?  // "left" or "right"
 }
 
 // MARK: - The drawing (pet + flag)
@@ -394,6 +397,495 @@ final class HelperRun {
     }
 }
 
+// MARK: - Sitting pets (front-facing, they wait in the corner with a note)
+
+let catSit = [
+    ".oo..........oo...",
+    ".opo........opo...",
+    ".okpoooooooopko...",
+    ".okkkkkkkkkkkko...",
+    "okkkkkkkkkkkkkko..",
+    "okkggkkkkkkggkko..",
+    "okkggkkkkkkggkko..",
+    "okkkkkkppkkkkkko..",
+    ".okkkkkkkkkkkko...",
+    "..oookkkkkkooo....",
+    "...okkkkkkkko.....",
+    "..okkhkkkkkkko....",
+    "..okhkkkkkkkko....",
+    "..okhkkkkkkkko....",
+    "..okkkkkkkkkko....",
+    "..okkokkkkokkko...",
+    "...ooooooooooo....",
+]
+let dogSit = [
+    "....oooooooo......",
+    "...oggggggggo.....",
+    ".ooggggggggggoo...",
+    "ohhgggggggggghho..",
+    "ohhggeggggegghho..",
+    "ohhggeggggegghho..",
+    "ohhgggllllggghho..",
+    ".ohgglleellgghho..",
+    "..oggllppllggo....",
+    "...ooggppggoo.....",
+    "..oggggggggggo....",
+    "..oggllllllggo....",
+    "..oggllllllggo....",
+    "..ogggllllgggo....",
+    "..oggggggggggo....",
+    "..ollggggggllo....",
+    "...oooooooooo.....",
+]
+
+/// Two tail positions for the wag, as (column, row) cells.
+func sittingTail(_ animal: Animal, _ pose: Int) -> [(Int, Int)] {
+    if animal == .cat {
+        return pose == 0 ? [(14, 14), (15, 13), (15, 12), (15, 11), (14, 10)]
+                         : [(14, 14), (15, 14), (16, 13), (16, 12), (16, 11)]
+    }
+    return pose == 0 ? [(14, 12), (15, 11), (16, 10)] : [(14, 12), (15, 12), (16, 11)]
+}
+
+/// The sitting pet as a 20 x 17 grid of palette keys. `hold` is 0 (paws down),
+/// 1 (starting to reach) or 2 (front leg resting on the note, to the left).
+func sittingGrid(_ animal: Animal, tail: Int, blink: Bool, hold: Int) -> [[Character]] {
+    var g: [[Character]] = (animal == .cat ? catSit : dogSit).map { row in
+        [".", "."] + Array(row.padding(toLength: 18, withPad: ".", startingAt: 0))
+    }
+    let fur: Character = animal == .cat ? "k" : "g"
+    func outline(_ cells: [(Int, Int)]) {
+        for (c, r) in cells {
+            for (dc, dr) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let cc = c + dc, rr = r + dr
+                if rr >= 0 && rr < g.count && cc >= 0 && cc < g[rr].count && g[rr][cc] == "." {
+                    g[rr][cc] = "o"
+                }
+            }
+        }
+    }
+    let tailCells = sittingTail(animal, tail).map { ($0.0 + 2, $0.1) }
+    for (c, r) in tailCells { g[r][c] = fur }
+    outline(tailCells)
+    if blink {
+        if animal == .cat {
+            for c in [5, 6, 13, 14] { g[5][c] = "k"; g[6][c] = "o" }
+        } else {
+            for c in [7, 12] { g[4][c] = "g" }
+        }
+    }
+    if hold > 0 {
+        let arm: [(Int, Int)] = hold == 1 ? [(3, 11), (3, 12)]
+            : [(1, 11), (2, 11), (3, 11), (1, 12), (2, 12), (3, 12)]
+        for (c, r) in arm + [(4, 11), (4, 12)] { g[r][c] = fur }
+        outline(arm)
+        if hold == 2 { g[12][1] = animal == .cat ? "p" : "l" }    // a little toe bean
+    }
+    return g
+}
+
+// MARK: - Planned tasks
+
+let dayFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd"
+    return f
+}()
+
+func dayKey(_ date: Date) -> String { dayFormatter.string(from: date) }
+
+/// 1 = Monday ... 7 = Sunday
+func isoWeekday(_ date: Date) -> Int {
+    let w = Calendar.current.component(.weekday, from: date)
+    return w == 1 ? 7 : w - 1
+}
+
+func timeLabel(_ hour: Int, _ minute: Int) -> String { String(format: "%02d:%02d", hour, minute) }
+
+struct PlannedTask: Codable {
+    var id: String
+    var text: String
+    var hour: Int
+    var minute: Int
+    var date: String?        // "yyyy-MM-dd" for a one-off task
+    var weekdays: [Int]?     // for a repeating task, 1 = Monday ... 7 = Sunday
+
+    func occurs(on day: Date) -> Bool {
+        if let days = weekdays, !days.isEmpty { return days.contains(isoWeekday(day)) }
+        return date == dayKey(day)
+    }
+
+    func time(on day: Date) -> Date {
+        Calendar.current.date(bySettingHour: hour, minute: minute, second: 0, of: day) ?? day
+    }
+
+    var repeatLabel: String? {
+        guard let days = weekdays, !days.isEmpty else { return nil }
+        if days.count == 7 { return "daily" }
+        if Set(days) == Set(1...5) { return "weekdays" }
+        let letters = ["m", "t", "w", "t", "f", "s", "s"]
+        return days.sorted().map { letters[$0 - 1] }.joined()
+    }
+}
+
+struct TaskGroup {
+    let hour: Int
+    let minute: Int
+    let tasks: [PlannedTask]
+}
+
+/// Reads a time typed at the start of a line, e.g. "8:15 take charger", "8h30 gym", "08.00 call".
+func parseQuickTime(_ text: String) -> (Int, Int, String)? {
+    let chars = Array(text)
+    var i = 0
+    var hourDigits = ""
+    while i < chars.count, chars[i].isNumber, hourDigits.count < 2 { hourDigits.append(chars[i]); i += 1 }
+    guard !hourDigits.isEmpty, i < chars.count, [":", "h", "."].contains(chars[i]) else { return nil }
+    i += 1
+    var minuteDigits = ""
+    while i < chars.count, chars[i].isNumber, minuteDigits.count < 2 { minuteDigits.append(chars[i]); i += 1 }
+    guard minuteDigits.count != 1, let hour = Int(hourDigits), hour < 24 else { return nil }
+    let minute = Int(minuteDigits) ?? 0
+    guard minute < 60 else { return nil }
+    let rest = String(chars[i...]).trimmingCharacters(in: .whitespaces)
+    return (hour, minute, rest)
+}
+
+struct NoteRequest {
+    let time: Date
+    let label: String
+    let items: [String]
+    let late: Bool
+    var notBefore: Date
+    /// The cat brings the morning, the dog the afternoon and evening.
+    var animal: Animal { Calendar.current.component(.hour, from: time) < 12 ? .cat : .dog }
+}
+
+let demoMode = CommandLine.arguments.contains("--demo")
+
+// MARK: - The note in the corner
+
+final class NoteView: NSView {
+    let animal: Animal
+    let lines: [String]
+    let leftCorner: Bool
+    let P: CGFloat = 4               // one pet pixel
+    let u: CGFloat = 2               // one note pixel
+    let headroom: CGFloat = 30       // space above the pet for its jump
+    let paper = rgb(255, 251, 238)
+    let tape = rgb(247, 190, 205)
+    let accent = rgb(226, 92, 132)
+    let cardW: CGFloat
+    let cardH: CGFloat
+    var cardX: CGFloat = 0
+    var petX: CGFloat = 0
+    var cardY: CGFloat { headroom + 2 }
+    var petY: CGFloat { headroom }
+    var buttonY: CGFloat { cardY + 12 + 6 + CGFloat(lines.count) * 22 + 2 }
+
+    // What the controller animates
+    var showPet = false
+    var petDY: CGFloat = 0
+    var rowH: CGFloat = 4
+    var hold = 0
+    var tail = 0
+    var blink = false
+    var cardDY: CGFloat?             // nil while there is no card
+    var clipCard = false
+    var sparkleStep: Int?
+    var dust: Int?
+    var heart = false
+    var onClick: ((NSPoint) -> Void)?
+
+    init(animal: Animal, lines: [String], leftCorner: Bool) {
+        self.animal = animal
+        self.lines = lines
+        self.leftCorner = leftCorner
+        let widest = lines.map { pixelTextWidth($0, unit: 2) }.max() ?? 0
+        cardW = max(widest + 28, 160)
+        cardH = 12 + 6 + CGFloat(lines.count) * 22 + 2 + 22 + 12
+        super.init(frame: .zero)
+        let rightCardX: CGFloat = 12
+        let rightPetX = rightCardX + cardW - 14
+        let width = rightPetX + 20 * P + 16
+        let height = headroom + max(cardH + 4, 17 * P) + 18
+        setFrameSize(NSSize(width: width, height: height))
+        cardX = leftCorner ? width - rightCardX - cardW : rightCardX
+        petX = leftCorner ? width - rightPetX - 20 * P : rightPetX
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override var isFlipped: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    var petRect: NSRect { NSRect(x: petX, y: petY - 4, width: 20 * P, height: 17 * P + 8) }
+    var laterRect: NSRect {
+        NSRect(x: cardX + 12, y: buttonY, width: pixelTextWidth("later", unit: u) + 14, height: 22)
+    }
+
+    private func fill(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat, _ colour: NSColor) {
+        colour.setFill()
+        NSBezierPath(rect: NSRect(x: x, y: y, width: w, height: h)).fill()
+    }
+
+    private func block(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat, _ colour: NSColor) {
+        fill(x + u, y, w - 2 * u, h, colour)
+        fill(x, y + u, w, h - 2 * u, colour)
+    }
+
+    private func box(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat, _ colour: NSColor) {
+        block(x, y, w, h, ink)
+        block(x + u, y + u, w - 2 * u, h - 2 * u, colour)
+    }
+
+    private func drawCard(_ dy: CGFloat) {
+        let y = cardY + dy
+        box(cardX, y, cardW, cardH, paper)
+        fill(cardX + cardW / 2 - 18, y - 5, 36, 10, tape)
+        for (i, line) in lines.enumerated() {
+            let ly = y + 12 + CGFloat(i) * 22 + (i > 0 ? 6 : 0)
+            drawPixelText(line, x: cardX + 14, y: ly, unit: u, colour: i == 0 ? accent : ink)
+        }
+        var k: CGFloat = 0
+        let underline = pixelTextWidth(lines[0], unit: u)
+        while k < underline {
+            fill(cardX + 14 + k, y + 34, 3, 2, rgb(230, 200, 200))
+            k += 6
+        }
+        let b = laterRect.offsetBy(dx: 0, dy: dy)
+        box(b.minX, b.minY, b.width, b.height, rgb(255, 236, 242))
+        drawPixelText("later", x: b.minX + 7, y: b.minY + 2, unit: u, colour: ink)
+    }
+
+    private func drawPet() {
+        var grid = sittingGrid(animal, tail: tail, blink: blink, hold: hold)
+        if leftCorner { grid = grid.map { Array($0.reversed()) } }
+        let rows = CGFloat(grid.count)
+        let top = petY + petDY + rows * P - rows * rowH          // squash and stretch keep the feet down
+        for (r, row) in grid.enumerated() {
+            for (c, ch) in row.enumerated() {
+                guard let colour = animal.palette[ch] else { continue }
+                fill(petX + CGFloat(c) * P, top + CGFloat(r) * rowH, P, rowH, colour)
+            }
+        }
+    }
+
+    private func drawSparkle(_ step: Int) {
+        let cx = petX + 10 * P, cy = petY + 8 * P
+        let colours = [rgb(255, 214, 92), pink, rgb(255, 255, 255)]
+        for i in 0..<8 {
+            let angle = CGFloat(i) * .pi / 4
+            let dist = 10 + CGFloat(step) * 9
+            let sx = cx + cos(angle) * dist, sy = cy + sin(angle) * dist
+            let s: CGFloat = step > 2 ? 2 : 4
+            let c = colours[i % 3]
+            fill(sx - s / 2, sy - s / 2, s, s, c)
+            if step < 3 {
+                fill(sx - s / 2 - s, sy - s / 2, s, s, c); fill(sx + s / 2, sy - s / 2, s, s, c)
+                fill(sx - s / 2, sy - s / 2 - s, s, s, c); fill(sx - s / 2, sy + s / 2, s, s, c)
+            }
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSGraphicsContext.current?.shouldAntialias = false
+        if let step = sparkleStep { drawSparkle(step) }
+        if let dy = cardDY {
+            NSGraphicsContext.saveGraphicsState()
+            if clipCard {
+                NSBezierPath(rect: NSRect(x: 0, y: 0, width: bounds.width, height: petY + 17 * P + 2)).addClip()
+            }
+            drawCard(dy)
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        if showPet { drawPet() }
+        if let d = dust {
+            let feet = petY + 17 * P - 3 - CGFloat(d) * 2
+            for dx in [CGFloat(-8), -4, 20 * P + 2, 20 * P + 6] {
+                fill(petX + 8 + dx, feet, 3, 3, rgb(255, 255, 255))
+            }
+        }
+        if heart {
+            drawPixelText("<3", x: petX + 8 * P, y: petY + petDY - 22, unit: u, colour: accent)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onClick?(convert(event.locationInWindow, from: nil))
+    }
+}
+
+/// One note: the pet pops in, holds up the list, and waits until it is clicked.
+final class NoteRun {
+    let request: NoteRequest
+    let panel: NSPanel
+    let view: NoteView
+    let onFinish: (Bool) -> Void
+    var timer: Timer?
+    var frame = 0
+    var phase = "enter"
+    var phaseStart = 0
+    var lastNudge = Date()
+    var snoozed = false
+    let nudgeEvery: TimeInterval = 120
+
+    init(request: NoteRequest, leftCorner: Bool, onFinish: @escaping (Bool) -> Void) {
+        self.request = request
+        self.onFinish = onFinish
+        let title = request.late ? "missed \(request.label)" : "\(request.label) <3"
+        let items = request.items.prefix(7).map { "- " + String($0.prefix(26)) }
+        var lines = [title] + items
+        if request.items.count > 7 { lines.append("+ \(request.items.count - 7) more") }
+        view = NoteView(animal: request.animal, lines: lines, leftCorner: leftCorner)
+
+        let screen = NSScreen.main ?? NSScreen.screens[0]
+        let area = screen.visibleFrame                       // below the menu bar
+        let size = view.frame.size
+        let x = leftCorner ? area.minX + 4 : area.maxX - size.width - 4
+        let y = area.maxY - size.height + 6
+        panel = NSPanel(contentRect: NSRect(x: x, y: y, width: size.width, height: size.height),
+                        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.level = .statusBar
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.contentView = view
+        view.onClick = { [weak self] point in self?.clicked(point) }
+    }
+
+    func start() {
+        panel.orderFrontRegardless()
+        let t = Timer(timeInterval: 0.06, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    private func idle() {
+        view.tail = (frame / 6) % 2
+        view.blink = frame % 40 == 30 || frame % 40 == 31
+    }
+
+    private func setPhase(_ p: String) {
+        phase = p
+        phaseStart = frame
+    }
+
+    func tick() {
+        frame += 1
+        let k = frame - phaseStart
+        switch phase {
+        case "enter":
+            let jump: [(CGFloat, CGFloat)] = [(0, 3), (-10, 5), (-18, 5), (-21, 4), (-18, 4), (-10, 4), (0, 3), (0, 3.5), (0, 4)]
+            let rise: [CGFloat] = [60, 34, 14, 2, -6, -3, 0]
+            if k < 3 {
+                view.sparkleStep = k                          // sparkles gather
+            } else if k < 3 + jump.count {
+                let j = k - 3                                 // crouch, jump, land
+                view.showPet = true
+                view.petDY = jump[j].0
+                view.rowH = jump[j].1
+                view.sparkleStep = j < 4 ? 3 + j : nil
+                view.dust = (j == 6 || j == 7) ? j - 6 : nil
+            } else {
+                view.sparkleStep = nil
+                view.dust = nil
+                view.petDY = 0
+                view.rowH = 4
+                idle()
+                let c = k - 3 - jump.count                    // the note rises from behind
+                if c < rise.count {
+                    view.cardDY = rise[c]
+                    view.clipCard = rise[c] > 20
+                    view.hold = c < 3 ? 0 : (c == 3 ? 1 : 2)
+                } else {
+                    view.cardDY = 0
+                    view.clipCard = false
+                    view.hold = 2
+                    lastNudge = Date()
+                    setPhase("wait")
+                    reportForTest()
+                }
+            }
+        case "wait":
+            idle()
+            if Date().timeIntervalSince(lastNudge) >= nudgeEvery { setPhase("nudge") }
+        case "nudge":                                         // two little hops; the note stays still
+            let hop: [CGFloat] = [0, -8, -12, -8, 0, 0, -8, -12, -8, 0]
+            idle()
+            if k < hop.count {
+                view.hold = 0
+                view.petDY = hop[k]
+            } else {
+                view.petDY = 0
+                view.hold = 2
+                lastNudge = Date()
+                setPhase("wait")
+            }
+        case "cheer":                                         // done: happy hops with a heart
+            let hop: [CGFloat] = [0, -8, -12, -8, 0, 0, -8, -12, -8, 0, 0, 0]
+            view.cardDY = nil
+            view.hold = 0
+            view.heart = true
+            view.tail = (k / 2) % 2
+            if k < hop.count { view.petDY = hop[k] } else { setPhase("leave") }
+        case "leave":                                         // jumps up and vanishes in sparkles
+            view.cardDY = nil
+            view.heart = false
+            view.hold = 0
+            let up: [(CGFloat, CGFloat)] = [(0, 3), (-10, 5), (-20, 5)]
+            if k < up.count {
+                view.petDY = up[k].0
+                view.rowH = up[k].1
+            } else if k < up.count + 4 {
+                view.showPet = false
+                view.sparkleStep = k - up.count + 2
+            } else {
+                finish()
+                return
+            }
+        default:
+            break
+        }
+        view.needsDisplay = true
+    }
+
+    func clicked(_ point: NSPoint) {
+        guard phase == "wait" || phase == "nudge" else { return }
+        if view.laterRect.contains(point) {
+            snoozed = true
+            view.petDY = 0
+            setPhase("leave")
+        } else if view.petRect.contains(point) {
+            view.petDY = 0
+            setPhase("cheer")
+        }
+    }
+
+    func finish() {
+        timer?.invalidate()
+        timer = nil
+        panel.orderOut(nil)
+        onFinish(snoozed)
+    }
+
+    /// In demo mode, writes where the pet and the "later" button are, for the automated test.
+    private func reportForTest() {
+        guard demoMode else { return }
+        let top = (NSScreen.screens.first?.frame.maxY) ?? 0
+        func spot(_ r: NSRect) -> String {
+            let inWindow = view.convert(NSPoint(x: r.midX, y: r.midY), to: nil)
+            let onScreen = panel.convertPoint(toScreen: inWindow)
+            return "\(Int(onScreen.x)) \(Int(top - onScreen.y))"
+        }
+        let text = "pet \(spot(view.petRect))\nlater \(spot(view.laterRect))\n"
+        try? text.write(toFile: "/tmp/lh-demo.txt", atomically: true, encoding: .utf8)
+    }
+}
+
 // MARK: - The pixel menu (opens from the paw icon)
 
 final class KeyPanel: NSPanel {
@@ -411,6 +903,14 @@ final class MenuView: NSView {
     var draft = ""
     var draftAnimal: Animal = .cat
     var tick = 0
+    var tab = demoMode ? "tasks" : "helpers"
+    var taskDay = (demoMode || Calendar.current.component(.hour, from: Date()) >= 17) ? 1 : 0   // 0 today, 1 tomorrow
+    var taskEditing = false
+    var taskDraft = ""
+    var taskHour = 8
+    var taskMinute = 0
+    var taskRepeat = "once"          // once, daily, weekdays, days
+    var taskDays: Set<Int> = []
 
     init(app: AppDelegate) {
         self.app = app
@@ -534,6 +1034,22 @@ final class MenuView: NSView {
         pxText(status, titleX, y + 32, soft)
         y += 60 + 10
 
+        // Tabs
+        var tabX = left
+        tabX += pxButton("helpers", tabX, y, active: tab == "helpers", action: { [unowned self] in
+            self.tab = "helpers"
+            self.taskEditing = false
+        }) + 6
+        pxButton("tasks", tabX, y, active: tab == "tasks", action: { [unowned self] in
+            self.tab = "tasks"
+            self.editing = false
+        })
+        y += 24 + 10
+
+        if tab == "tasks" {
+            return buildTasks(y)
+        }
+
         // One card per reminder
         for r in app.reminders {
             pxBlock(left, y, right - left, 60, card)
@@ -625,6 +1141,164 @@ final class MenuView: NSView {
         return y
     }
 
+    var selectedDay: Date {
+        Calendar.current.date(byAdding: .day, value: taskDay, to: Date()) ?? Date()
+    }
+
+    func startTask() {
+        taskEditing = true
+        taskDraft = ""
+        taskRepeat = "once"
+        taskDays = []
+        if taskDay == 0 {
+            taskHour = min(23, Calendar.current.component(.hour, from: Date()) + 1)
+        } else {
+            taskHour = 8
+        }
+        taskMinute = 0
+        app.focusPanel()
+    }
+
+    func commitTask() {
+        var text = taskDraft.trimmingCharacters(in: .whitespaces)
+        if let (hour, minute, rest) = parseQuickTime(text) {
+            taskHour = hour
+            taskMinute = minute
+            text = rest
+        }
+        guard !text.isEmpty else { return }
+        var days: [Int]? = nil
+        switch taskRepeat {
+        case "daily": days = Array(1...7)
+        case "weekdays": days = Array(1...5)
+        case "days": days = taskDays.isEmpty ? nil : taskDays.sorted()
+        default: days = nil
+        }
+        app.addTask(text, hour: taskHour, minute: taskMinute, day: selectedDay, weekdays: days)
+        taskDraft = ""                     // stays open, so you can add the next one
+    }
+
+    @discardableResult
+    func buildTasks(_ start: CGFloat) -> CGFloat {
+        let app = self.app
+        let left = margin
+        let right = panelWidth - margin
+        var y = start
+
+        // Which day
+        var dayX = left
+        dayX += pxButton("today", dayX, y, active: taskDay == 0, action: { [unowned self] in self.taskDay = 0 }) + 6
+        dayX += pxButton("tomorrow", dayX, y, active: taskDay == 1, action: { [unowned self] in self.taskDay = 1 }) + 10
+        let names = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        let day = selectedDay
+        let dayNumber = Calendar.current.component(.day, from: day)
+        pxText("\(names[isoWeekday(day) - 1]) \(dayNumber)", dayX, y + 3, soft)
+        y += 24 + 10
+
+        // The plan for that day, one card per time
+        let groups = app.taskGroups(on: day)
+        if groups.isEmpty && !taskEditing {
+            pxText("nothing planned yet", left + 8, y, soft)
+            y += 18 + 12
+        }
+        for group in groups {
+            let h = 34 + CGFloat(group.tasks.count) * 28
+            pxBlock(left, y, right - left, h, card)
+            let tw = pxText(timeLabel(group.hour, group.minute), left + 10, y + 7, line)
+            let animal: Animal = group.hour < 12 ? .cat : .dog
+            pxBox(left + 10 + tw + 10, y + 9, 14, 14,
+                  fill: animal == .cat ? rgb(54, 48, 66) : rgb(232, 178, 92), border: line)
+            var ty = y + 34
+            for task in group.tasks {
+                let xW = buttonWidth("x")
+                var textRight = right - 8 - xW - 8
+                if let tag = task.repeatLabel {
+                    let tagW = pixelTextWidth(tag, unit: unit)
+                    pxText(tag, textRight - tagW, ty, soft)
+                    textRight -= tagW + 8
+                }
+                pxText(clipped("- " + task.text, to: textRight - (left + 10)), left + 10, ty, line)
+                let id = task.id
+                pxButton("x", right - 8 - xW, ty - 3, action: { app.removeTask(id) })
+                ty += 28
+            }
+            y += h + 6
+        }
+
+        // Adding a task
+        if taskEditing {
+            var rows: CGFloat = 4 * 32 + 16
+            if taskRepeat == "days" { rows += 32 }
+            pxBlock(left, y, right - left, rows, card)
+            var fy = y + 8
+            // time
+            var fx = left + 8
+            fx += pxText("at", fx, fy + 3, soft) + 8
+            fx += pxButton("-", fx, fy, action: { [unowned self] in self.taskHour = (self.taskHour + 23) % 24 }) + 4
+            fx += pxText(String(format: "%02d", taskHour), fx, fy + 3, line) + 4
+            fx += pxButton("+", fx, fy, action: { [unowned self] in self.taskHour = (self.taskHour + 1) % 24 }) + 8
+            fx += pxText(":", fx, fy + 3, line) + 8
+            fx += pxButton("-", fx, fy, action: { [unowned self] in
+                self.taskMinute = ((self.taskMinute + 55) / 5 * 5) % 60
+            }) + 4
+            fx += pxText(String(format: "%02d", taskMinute), fx, fy + 3, line) + 4
+            pxButton("+", fx, fy, action: { [unowned self] in self.taskMinute = (self.taskMinute / 5 * 5 + 5) % 60 })
+            fy += 32
+            // text
+            pxBox(left + 8, fy, right - left - 16, 24, fill: bg, border: line)
+            if taskDraft.isEmpty {
+                pxText("8:15 take charger", left + 16, fy + 3, soft)
+            } else {
+                let w = pxText(clipped(taskDraft, to: right - left - 40), left + 16, fy + 3, line)
+                if tick % 2 == 0 { pxFill(left + 16 + w + 2, fy + 4, 2, 16, line) }
+            }
+            fy += 32
+            // repeat
+            var rx = left + 8
+            for (key, label) in [("once", "once"), ("daily", "daily"), ("weekdays", "weekdays"), ("days", "days")] {
+                rx += pxButton(label, rx, fy, active: taskRepeat == key, action: { [unowned self] in
+                    self.taskRepeat = key
+                }) + 6
+            }
+            fy += 32
+            if taskRepeat == "days" {
+                var wx = left + 8
+                for (i, letter) in ["m", "t", "w", "t", "f", "s", "s"].enumerated() {
+                    let d = i + 1
+                    wx += pxButton(letter, wx, fy, active: taskDays.contains(d), action: { [unowned self] in
+                        if self.taskDays.contains(d) { self.taskDays.remove(d) } else { self.taskDays.insert(d) }
+                    }) + 6
+                }
+                fy += 32
+            }
+            // add / done
+            let doneW = buttonWidth("done")
+            pxButton("done", right - 8 - doneW, fy, action: { [unowned self] in
+                self.commitTask()
+                self.taskEditing = false
+                self.taskDraft = ""
+            })
+            pxButton("add", right - 8 - doneW - 6 - buttonWidth("add"), fy, active: true,
+                     action: { [unowned self] in self.commitTask() })
+            y += rows + 10
+        } else {
+            pxButton("+ add task", left, y, action: { [unowned self] in self.startTask() })
+            y += 24 + 10
+        }
+
+        // Which corner the notes appear in, theme and quit
+        var cx = left
+        cx += pxText("notes at", cx, y + 3, soft) + 8
+        cx += pxButton("left", cx, y, active: app.noteCorner == "left", action: { app.setNoteCorner("left") }) + 6
+        pxButton("right", cx, y, active: app.noteCorner == "right", action: { app.setNoteCorner("right") })
+        let quitW = buttonWidth("quit")
+        let themeLabel = app.dark ? "light" : "dark"
+        pxButton("quit", right - quitW, y, action: { NSApp.terminate(nil) })
+        pxButton(themeLabel, right - quitW - 6 - buttonWidth(themeLabel), y, action: { app.toggleDark() })
+        y += 24 + margin
+        return y
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         NSGraphicsContext.current?.shouldAntialias = false
         painting = true
@@ -654,13 +1328,34 @@ final class MenuView: NSView {
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 {                      // esc
-            if editing {
+            if editing || taskEditing {
                 editing = false
                 draft = ""
+                taskEditing = false
+                taskDraft = ""
                 app.refreshPanel()
             } else {
                 app.closePanel()
             }
+            return
+        }
+        if taskEditing {
+            switch event.keyCode {
+            case 51:                                  // delete
+                if !taskDraft.isEmpty { taskDraft.removeLast() }
+            case 36, 76:                              // return / enter adds the task
+                commitTask()
+            default:
+                for ch in (event.characters ?? "").lowercased() {
+                    let c: Character = ch == "\u{2019}" ? "'" : ch
+                    if pixelFont[c] != nil && taskDraft.count < 32 { taskDraft.append(c) }
+                }
+                if let (hour, minute, _) = parseQuickTime(taskDraft) {   // "8:15 ..." sets the time
+                    taskHour = hour
+                    taskMinute = minute
+                }
+            }
+            app.refreshPanel()
             return
         }
         guard editing else { return }
@@ -695,6 +1390,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var current: HelperRun?
     var queue: [(Animal, String)] = []
     var reminders: [Reminder] = []
+    var tasks: [PlannedTask] = []
+    var delivered: Set<String> = []
+    var noteCorner = "right"
+    var noteQueue: [NoteRequest] = []
+    var currentNote: NoteRun?
     var panel: KeyPanel?
     var menuView: MenuView?
     var clickMonitor: Any?
@@ -730,16 +1430,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             self?.enqueue(.cat, "hi! i'm here to help <3")
         }
+        // Notes that are due (or were missed while the app was closed).
+        DispatchQueue.main.asyncAfter(deadline: .now() + (demoMode ? 0.5 : 2.5)) { [weak self] in
+            self?.checkTasks()
+        }
     }
 
     // MARK: Saving
 
     func load() {
+        if demoMode {
+            reminders = defaultReminders()
+            setUpDemo()
+            return
+        }
         if let data = UserDefaults.standard.data(forKey: "state"),
            let state = try? JSONDecoder().decode(SavedState.self, from: data) {
             dark = state.dark
             height = state.height ?? "bottom"
             customY = state.customY.map { CGFloat($0) }
+            tasks = state.tasks ?? []
+            delivered = Set(state.delivered ?? [])
+            noteCorner = state.noteCorner ?? "right"
             day = state.day
             reminders = state.reminders.map {
                 Reminder($0.text, Animal(rawValue: $0.animal) ?? .cat, minutes: $0.minutes,
@@ -751,12 +1463,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func save() {
+        if demoMode { return }
         let saved = reminders.map {
             SavedReminder(text: $0.text, animal: $0.animal.rawValue, minutes: $0.minutes,
                           enabled: $0.enabled, done: $0.done, custom: $0.custom)
         }
         let state = SavedState(reminders: saved, dark: dark, day: day,
-                               height: height, customY: customY.map { Double($0) })
+                               height: height, customY: customY.map { Double($0) },
+                               tasks: tasks, delivered: Array(delivered), noteCorner: noteCorner)
         if let data = try? JSONEncoder().encode(state) {
             UserDefaults.standard.set(data, forKey: "state")
         }
@@ -770,6 +1484,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if today != day {
             day = today
             reminders.forEach { $0.done = 0 }
+            // Forget one-off tasks and shown-note records older than yesterday.
+            let yesterday = dayKey(Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date())
+            tasks.removeAll { task in
+                guard let d = task.date, task.weekdays == nil else { return false }
+                return d < yesterday
+            }
+            delivered = delivered.filter { ($0.split(separator: "|").last.map(String.init) ?? "") >= yesterday }
             save()
         }
     }
@@ -866,6 +1587,105 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         save()
     }
 
+    // MARK: Tasks and notes
+
+    func taskGroups(on day: Date) -> [TaskGroup] {
+        var byTime: [Int: [PlannedTask]] = [:]
+        for t in tasks where t.occurs(on: day) { byTime[t.hour * 60 + t.minute, default: []].append(t) }
+        return byTime.keys.sorted().map { TaskGroup(hour: $0 / 60, minute: $0 % 60, tasks: byTime[$0]!) }
+    }
+
+    func addTask(_ text: String, hour: Int, minute: Int, day: Date, weekdays: [Int]?) {
+        let repeating = !(weekdays ?? []).isEmpty
+        let task = PlannedTask(id: UUID().uuidString, text: text, hour: hour, minute: minute,
+                               date: repeating ? nil : dayKey(day), weekdays: repeating ? weekdays : nil)
+        // A time that has already passed today does not pop up straight away.
+        let now = Date()
+        for d in [Calendar.current.date(byAdding: .day, value: -1, to: now) ?? now, now]
+            where task.occurs(on: d) && task.time(on: d) <= now {
+            delivered.insert(task.id + "|" + dayKey(d))
+        }
+        tasks.append(task)
+        save()
+    }
+
+    func removeTask(_ id: String) {
+        tasks.removeAll { $0.id == id }
+        save()
+    }
+
+    func setNoteCorner(_ corner: String) {
+        noteCorner = corner
+        save()
+    }
+
+    /// Finds notes that are due, including ones missed while the Mac was asleep or the app closed.
+    func checkTasks() {
+        let now = Date()
+        let calendar = Calendar.current
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: now) ?? now
+        var groups: [Date: [String]] = [:]
+        for day in [yesterday, now] {
+            for task in tasks where task.occurs(on: day) {
+                let when = task.time(on: day)
+                let mark = task.id + "|" + dayKey(day)
+                if when <= now && !delivered.contains(mark) {
+                    delivered.insert(mark)
+                    groups[when, default: []].append(task.text)
+                }
+            }
+        }
+        if !groups.isEmpty {
+            save()
+            for when in groups.keys.sorted() {
+                let parts = calendar.dateComponents([.hour, .minute], from: when)
+                noteQueue.append(NoteRequest(time: when,
+                                             label: timeLabel(parts.hour ?? 0, parts.minute ?? 0),
+                                             items: groups[when] ?? [],
+                                             late: now.timeIntervalSince(when) > 120,
+                                             notBefore: now))
+            }
+        }
+        showNextNote()
+    }
+
+    func showNextNote() {
+        guard currentNote == nil else { return }
+        let now = Date()
+        guard let index = noteQueue.firstIndex(where: { $0.notBefore <= now }) else { return }
+        var request = noteQueue.remove(at: index)
+        let run = NoteRun(request: request, leftCorner: noteCorner == "left") { [weak self] snoozed in
+            guard let self = self else { return }
+            self.currentNote = nil
+            if snoozed {                               // "later": back in 10 minutes
+                request.notBefore = Date().addingTimeInterval(600)
+                self.noteQueue.append(request)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.showNextNote() }
+        }
+        currentNote = run
+        run.start()
+    }
+
+    /// Sample tasks for the automated test (`--demo`); nothing is saved.
+    func setUpDemo() {
+        let now = Date()
+        let calendar = Calendar.current
+        let hour = calendar.component(.hour, from: now)
+        let minute = calendar.component(.minute, from: now)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: now) ?? now
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: now) ?? now
+        tasks = [
+            PlannedTask(id: "demo1", text: "take charger", hour: hour, minute: minute, date: dayKey(now), weekdays: nil),
+            PlannedTask(id: "demo2", text: "revise chem ch.3", hour: hour, minute: minute, date: dayKey(now), weekdays: nil),
+            PlannedTask(id: "demo3", text: "print french essay", hour: hour, minute: minute, date: dayKey(now), weekdays: nil),
+            PlannedTask(id: "demo4", text: "water the plant", hour: 20, minute: 30, date: dayKey(yesterday), weekdays: nil),
+        ]
+        addTask("take student card", hour: 8, minute: 15, day: tomorrow, weekdays: Array(1...5))
+        addTask("gym bag", hour: 18, minute: 30, day: tomorrow, weekdays: nil)
+        addTask("call mum", hour: 18, minute: 30, day: tomorrow, weekdays: nil)
+    }
+
     // MARK: The panel
 
     @objc func togglePanel() {
@@ -957,6 +1777,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func check() {
         rollDay()
+        checkTasks()
         let now = Date()
         if let until = snoozeUntil, now >= until { wake() }
         guard !sleeping else { return }
@@ -987,6 +1808,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Don't unleash a parade of overdue helpers after the Mac wakes up.
         reminders.forEach { $0.reschedule() }
         queue.removeAll()
+        // Task notes, though, are shown even if they were missed.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.checkTasks() }
     }
 }
 

@@ -1,11 +1,11 @@
 name: Build app
 
 # Builds "Little Helpers.app" on a Mac in the cloud.
-# Every push to main builds the app and publishes (or updates) the release
-# named after the number in the VERSION file, e.g. 1.0 -> v1.0.
+# Every push builds and tests the app. Only pushes to main publish (or update)
+# the release named after the number in the VERSION file, e.g. 1.0 -> v1.0.
 on:
   push:
-    branches: [main]
+    branches-ignore: [test-screenshots]
   workflow_dispatch:
 
 permissions:
@@ -56,11 +56,58 @@ jobs:
           pgrep -x LittleHelpers >/dev/null || { echo "The app stopped after opening the menu."; exit 1; }
           echo "The app is still running after opening the menu."
 
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: smoke-test-screenshots
-          path: shots
+      - name: Task notes test (demo tasks, click the pet, "later", tasks page)
+        run: |
+          cat > click.swift <<'SWIFT'
+          import CoreGraphics
+          import Foundation
+          let a = CommandLine.arguments
+          let p = CGPoint(x: Double(a[1])!, y: Double(a[2])!)
+          CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+          usleep(100000)
+          for type in [CGEventType.leftMouseDown, .leftMouseUp] {
+              CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+              usleep(80000)
+          }
+          SWIFT
+          swiftc click.swift -o click
+          pkill -x LittleHelpers || true
+          sleep 1
+          rm -f /tmp/lh-demo.txt
+          open "build/Little Helpers.app" --args --demo
+          sleep 1.1
+          screencapture -x shots/4-note-popping-in.png
+          sleep 3
+          screencapture -x shots/5-first-note.png
+          cat /tmp/lh-demo.txt || echo "No position file."
+          pet=$(grep '^pet' /tmp/lh-demo.txt | cut -d' ' -f2-)
+          ./click $pet
+          sleep 0.35
+          screencapture -x shots/6-clicked-pet-cheers.png
+          sleep 4
+          screencapture -x shots/7-second-note.png
+          later=$(grep '^later' /tmp/lh-demo.txt | cut -d' ' -f2-)
+          ./click $later
+          sleep 2.5
+          screencapture -x shots/8-after-later.png
+          osascript -e 'tell application "System Events" to tell process "LittleHelpers" to click menu bar item 1 of menu bar 1' || true
+          sleep 2
+          screencapture -x shots/9-tasks-page.png
+          pgrep -x LittleHelpers >/dev/null || { echo "The app stopped during the task notes test."; exit 1; }
+          echo "The app is still running after the task notes test."
+
+      - name: Save the screenshots to the test-screenshots branch
+        if: always() && github.ref != 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [ -d shots ] || exit 0
+          cd shots
+          git init -q
+          git checkout -q -b test-screenshots
+          git add .
+          git -c user.name="test robot" -c user.email="actions@github.com" commit -qm "Screenshots from ${GITHUB_SHA::7}"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" test-screenshots
 
       - name: Read the version
         run: echo "VERSION=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_ENV"
@@ -71,6 +118,7 @@ jobs:
           path: LittleHelpers-mac.zip
 
       - name: Publish the release
+        if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VERSION }}
