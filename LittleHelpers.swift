@@ -602,7 +602,7 @@ final class NoteView: NSView {
         self.lines = lines
         self.leftCorner = leftCorner
         let widest = lines.map { pixelTextWidth($0, unit: 2) }.max() ?? 0
-        cardW = max(widest + 28, 160)
+        cardW = max(widest + 44, 170)          // room on the right for the paw
         cardH = 12 + 6 + CGFloat(lines.count) * 22 + 2 + 22 + 12
         super.init(frame: .zero)
         let rightCardX: CGFloat = 12

@@ -93,6 +93,14 @@ jobs:
           osascript -e 'tell application "System Events" to tell process "LittleHelpers" to click menu bar item 1 of menu bar 1' || true
           sleep 2
           screencapture -x shots/9-tasks-page.png
+          ./click 653 358
+          sleep 1
+          osascript -e 'tell application "System Events" to keystroke "9:30 buy milk"' || true
+          sleep 1
+          screencapture -x shots/10-typing-a-task.png
+          osascript -e 'tell application "System Events" to key code 36' || true
+          sleep 1
+          screencapture -x shots/11-task-added.png
           pgrep -x LittleHelpers >/dev/null || { echo "The app stopped during the task notes test."; exit 1; }
           echo "The app is still running after the task notes test."
 
