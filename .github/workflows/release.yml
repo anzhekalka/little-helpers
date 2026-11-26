@@ -138,6 +138,8 @@ jobs:
           body: |
             Pixel pets that run across your Mac with gentle reminders <3
 
+            **New in 1.1:** task notes. Plan your day, and a pet pops up in the corner with your list at the right time.
+
             **How to install**
             1. Download `LittleHelpers-mac.zip` below and double-click it.
             2. Drag **Little Helpers** into your **Applications** folder and open it.

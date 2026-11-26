@@ -6,12 +6,29 @@ A black cat and a golden dog sprint along the bottom of your screen carrying lit
 they remind you to blink, drink water, fix your posture and stretch. Clicks pass straight
 through them, so they never get in your way.
 
+**New in 1.1: task notes.** Plan tomorrow the night before ("8:15 take charger",
+"revise for the maths test"), and at that exact time a pet pops up in the corner holding
+your list. It waits until you click it, then cheers and leaves.
+
 <p>
   <img src="assets/cat_blink.gif" width="400" alt="Pixel cat with a 'don't forget to blink' flag">
   <img src="assets/dog_posture.gif" width="360" alt="Pixel dog with a 'fix your posture' flag">
 </p>
 
 ## Features
+
+### Task notes (new in 1.1)
+
+- open the paw menu → **tasks**, pick **today** or **tomorrow**, and add tasks with a time
+- quick add: just type `8:15 take charger` and the time fills itself in
+- tasks can happen once, every day, on weekdays, or on the days you choose
+- at the time, the **cat** (morning) or the **dog** (afternoon and evening) pops up with a sparkle,
+  holding a note with everything due at that time
+- click the pet when you're done and it celebrates; **later** brings the note back in 10 minutes
+- ignored notes get a little hop every 2 minutes; notes missed while your Mac was asleep show up when it wakes
+- choose whether notes appear in the top-left or top-right corner
+
+### Running reminders
 
 - 🐈‍⬛ **cat:** "don't forget to blink" (every 20 min) and "drink water" (every 45 min)
 - 🐕 **dog:** "fix your posture" (every 30 min) and "stand up & stretch" (every 60 min)
